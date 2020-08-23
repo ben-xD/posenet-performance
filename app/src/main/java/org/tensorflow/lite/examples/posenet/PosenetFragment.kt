@@ -21,22 +21,8 @@ import android.app.AlertDialog
 import android.app.Dialog
 import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.ImageFormat
-import android.graphics.Matrix
-import android.graphics.Paint
-import android.graphics.PorterDuff
-import android.graphics.Rect
-import android.hardware.camera2.CameraAccessException
-import android.hardware.camera2.CameraCaptureSession
-import android.hardware.camera2.CameraCharacteristics
-import android.hardware.camera2.CameraDevice
-import android.hardware.camera2.CameraManager
-import android.hardware.camera2.CaptureRequest
-import android.hardware.camera2.CaptureResult
-import android.hardware.camera2.TotalCaptureResult
+import android.graphics.*
+import android.hardware.camera2.*
 import android.media.Image
 import android.media.ImageReader
 import android.media.ImageReader.OnImageAvailableListener
@@ -45,28 +31,21 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
-import androidx.fragment.app.DialogFragment
-import androidx.fragment.app.Fragment
 import android.util.Log
 import android.util.Size
 import android.util.SparseIntArray
-import android.view.LayoutInflater
-import android.view.Surface
-import android.view.SurfaceHolder
-import android.view.SurfaceView
-import android.view.View
-import android.view.ViewGroup
+import android.view.*
 import android.widget.Toast
 import androidx.core.app.ActivityCompat
-import kotlinx.coroutines.*
-import java.util.concurrent.Semaphore
-import java.util.concurrent.TimeUnit
-import kotlin.math.abs
+import androidx.fragment.app.DialogFragment
+import androidx.fragment.app.Fragment
 import org.tensorflow.lite.examples.posenet.lib.BodyPart
 import org.tensorflow.lite.examples.posenet.lib.Person
 import org.tensorflow.lite.examples.posenet.lib.Posenet
-import java.io.File
-import java.io.FileOutputStream
+import java.io.*
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
+import kotlin.math.abs
 
 class PosenetFragment :
     Fragment(),
@@ -74,6 +53,13 @@ class PosenetFragment :
     ActivityCompat.OnRequestPermissionsResultCallback {
 
     private var mediaPlayer: MediaPlayer? = null
+
+    private val maxFrames = 100
+    private var inferenceTimesInMS = FloatArray(maxFrames)
+    private var pipelineTimeInMS = FloatArray(maxFrames)
+
+    /** A counter to keep count of total frames.  */
+    private var frameCounter = 0
 
     /** List of body joints that should be connected.    */
     private val bodyJoints = listOf(
@@ -127,9 +113,6 @@ class PosenetFragment :
 
     /** The [android.util.Size.getHeight] of camera preview.  */
     private var previewHeight = 0
-
-    /** A counter to keep count of total frames.  */
-    private var frameCounter = 0
 
     /** An IntArray to save image data in ARGB8888 format  */
     private lateinit var rgbBytes: IntArray
@@ -224,6 +207,8 @@ class PosenetFragment :
         surfaceView = view.findViewById(R.id.surfaceView)
         surfaceHolder = surfaceView!!.holder
 //        surfaceHolder!!.addCallback(this)
+        activity!!.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        paint.textSize = 10F
     }
 
     override fun onStart() {
@@ -442,12 +427,8 @@ class PosenetFragment :
     /** A [OnImageAvailableListener] to receive frames as they are available.  */
     private var imageAvailableListener = object : OnImageAvailableListener {
         override fun onImageAvailable(imageReader: ImageReader) {
-//      // We need wait until we have some size from onPreviewSizeChosen
-//      if (previewWidth == 0 || previewHeight == 0) {
-//        return
-//      }
-
-            Log.d(TAG, "onImageAvailable: Just running an image now")
+            // Start time
+            val startTime = System.currentTimeMillis()
 
             val image = imageReader.acquireLatestImage() ?: return
             fillBytes(image.planes, yuvBytes)
@@ -485,7 +466,35 @@ class PosenetFragment :
 //            )
             image.close()
 
-            processImage(imageBitmap)
+            processImage(imageBitmap, startTime)
+
+            try {
+                // If one of first maxFrames frames, then save the time it took
+                if (frameCounter < maxFrames) {
+                    pipelineTimeInMS[frameCounter] = (System.currentTimeMillis() - startTime).toFloat()
+                } else if (frameCounter == maxFrames){
+                    // save the data into a csv file
+                    val file = File(context!!.getExternalFilesDir(null), "times.csv")
+                    val writer = FileWriter(file)
+
+                    file.createNewFile()
+
+                    writer.append("inferenceTimesInMS,pipelineTimeInMS\n")
+                    for (i in 0 until maxFrames) {
+                        writer.write(inferenceTimesInMS[i].toString())
+                        writer.write(",")
+                        writer.write(pipelineTimeInMS[i].toString())
+                        writer.write("\n")
+                    }
+                    writer.close()
+                    Log.d(TAG, "onImageAvailable: Saved cs v file to ${file.absolutePath}")
+                }
+            } catch (e: IOException) {
+                Log.e(TAG, "onImageAvailable: Unable to write csv file.")
+                e.printStackTrace()
+            }
+
+            frameCounter += 1
         }
     }
 
@@ -534,7 +543,7 @@ class PosenetFragment :
     }
 
     /** Draw bitmap on Canvas.   */
-    private fun draw(canvas: Canvas, person: Person, bitmap: Bitmap) {
+    private fun draw(canvas: Canvas, person: Person, bitmap: Bitmap, startTime: Long) {
         canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
         // Draw `bitmap` and `person` in square canvas.
         val screenWidth: Int
@@ -606,18 +615,27 @@ class PosenetFragment :
             paint
         )
         canvas.drawText(
-            "Time: %.2f ms".format(posenet.lastInferenceTimeNanos * 1.0f / 1_000_000),
+            "Inference time: %.2f ms".format(posenet.lastInferenceTimeNanos * 1.0f / 1_000_000),
             (15.0f * widthRatio),
             (70.0f * heightRatio + bottom),
+            paint
+        )
+        canvas.drawText(
+            "Pipeline time so far: %.2f ms".format((System.currentTimeMillis() - startTime).toFloat()),
+            (15.0f * widthRatio),
+            (90.0f * heightRatio + bottom),
             paint
         )
 
         // Draw!
         surfaceHolder!!.unlockCanvasAndPost(canvas)
+        if (frameCounter < maxFrames) {
+            inferenceTimesInMS[frameCounter] = posenet.lastInferenceTimeNanos * 1.0f / 1_000_000
+        }
     }
 
     /** Process image using Posenet library.   */
-    private fun processImage(bitmap: Bitmap) {
+    private fun processImage(bitmap: Bitmap, startTime: Long) {
         // Crop bitmap.
         val croppedBitmap = cropBitmap(bitmap)
 
@@ -627,7 +645,7 @@ class PosenetFragment :
         // Perform inference.
         val person = posenet.estimateSinglePose(scaledBitmap)
         val canvas: Canvas = surfaceHolder!!.lockCanvas()
-        draw(canvas, person, scaledBitmap)
+        draw(canvas, person, scaledBitmap, startTime)
     }
 
     /**
