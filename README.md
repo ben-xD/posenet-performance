@@ -1,11 +1,14 @@
 # TensorFlow Lite PoseNet Android Demo
+### Modifications
+I have modified the original PoseNet application to allow pose estimation on a video file, as opposed to the camera feed. Additionally, it also calculates the time for inference and time for the entire video pipeline, and saves this to a `.csv` file.
+ 
+ ![Video Input](video-posenet.png)
+
 ### Overview
 This is an app that continuously detects the body parts in the frames seen by
  your device's camera. These instructions walk you through building and running
  the demo on an Android device. Camera captures are discarded immediately after
  use, nothing is stored or saved.
- 
- ![Video Input](video-posenet.png)
 
 ![Demo Image](posenetimage.png)
 
